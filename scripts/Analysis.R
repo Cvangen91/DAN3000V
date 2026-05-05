@@ -1,17 +1,15 @@
 # Analysis.R
 # Spotify Data Analytics Project
-# This script loads the cleaned Spotify dataset, prepares the data,
-# performs exploratory analysis, and creates initial visualizations.
+# This script explores the cleaned Spotify dataset and builds models
+# to analyse whether audio features and genre can predict song popularity.
 
 # -----------------------------
 # 1. Load required packages
 # -----------------------------
 library(dplyr)
 library(readr)
-library(ggplot2)
 library(tidyr)
 library(caret)
-library(corrplot)
 library(rpart)
 library(rpart.plot)
 library(broom)
@@ -19,206 +17,183 @@ library(broom)
 # -----------------------------
 # 2. Load dataset
 # -----------------------------
-# Note:
-# The dataset uses:
-# - ";" as separator
-# - "," as decimal
-spotify <- read_delim("data_processed/spotify_clean.csv", delim = ";")
+spotify <- read_csv("data_processed/spotify_clean_new - without comma.csv")
 
 # -----------------------------
-# 3. Convert numeric columns
-# -----------------------------
-# Some numeric variables are imported as text because of decimal commas.
-spotify <- spotify %>%
-  mutate(across(
-    c(acousticness, danceability, energy, instrumentalness,
-      liveness, loudness, speechiness, tempo, popularity,
-      valence, duration_min),
-    ~ as.numeric(gsub(",", ".", .))
-  ))
-
-# -----------------------------
-# 4. Check data structure
+# 3. Inspect data
 # -----------------------------
 glimpse(spotify)
 summary(spotify)
-head(spotify)
 
 # -----------------------------
-# 5. Prepare variables
+# 4. Exploratory Data Analysis
 # -----------------------------
-# Convert is_hit to factor for classification analysis
-spotify$is_hit <- as.factor(spotify$is_hit)
 
-# Optional: check class balance
+# Check hit / non-hit distribution
 table(spotify$is_hit)
 prop.table(table(spotify$is_hit))
 
-# -----------------------------
-# 6. Exploratory Data Analysis
-# -----------------------------
+# Identify top 10 genres by average popularity
+top_genres <- spotify %>%
+  group_by(track_genre) %>%
+  summarise(avg_popularity = mean(popularity, na.rm = TRUE)) %>%
+  arrange(desc(avg_popularity)) %>%
+  slice_head(n = 10)
 
-# 6.1 Distribution of popularity
-ggplot(spotify, aes(x = popularity)) +
-  geom_histogram(bins = 30) +
-  theme_minimal() +
-  labs(
-    title = "Distribution of Song Popularity",
-    x = "Popularity",
-    y = "Count"
-  )
+top_genres
 
-# 6.2 Distribution of hit vs not hit
-ggplot(spotify, aes(x = is_hit)) +
-  geom_bar() +
-  theme_minimal() +
-  labs(
-    title = "Hit vs Not Hit Songs",
-    x = "Hit Status",
-    y = "Count"
-  )
+# Simple linear regressions for EDA relationships
+eda_models <- list(
+  danceability = lm(popularity ~ danceability, data = spotify),
+  loudness = lm(popularity ~ loudness, data = spotify),
+  valence = lm(popularity ~ valence, data = spotify),
+  instrumentalness = lm(popularity ~ instrumentalness, data = spotify),
+  speechiness = lm(popularity ~ speechiness, data = spotify)
+)
 
-# 6.3 Relationship between danceability and popularity
-ggplot(spotify, aes(x = danceability, y = popularity)) +
-  geom_point(alpha = 0.3) +
-  geom_smooth(method = "lm") +
-  theme_minimal() +
-  labs(
-    title = "Danceability vs Popularity",
-    x = "Danceability",
-    y = "Popularity"
-  )
+eda_results <- bind_rows(
+  lapply(names(eda_models), function(variable_name) {
+    tidy(eda_models[[variable_name]]) %>%
+      filter(term != "(Intercept)") %>%
+      mutate(variable = variable_name)
+  })
+) %>%
+  select(variable, estimate, p.value)
 
-# 6.4 Relationship between energy and popularity
-ggplot(spotify, aes(x = energy, y = popularity)) +
-  geom_point(alpha = 0.3) +
-  geom_smooth(method = "lm") +
-  theme_minimal() +
-  labs(
-    title = "Energy vs Popularity",
-    x = "Energy",
-    y = "Popularity"
-  )
-
-# 6.5 Relationship between valence and popularity
-ggplot(spotify, aes(x = valence, y = popularity)) +
-  geom_point(alpha = 0.3) +
-  geom_smooth(method = "lm") +
-  theme_minimal() +
-  labs(
-    title = "Valence vs Popularity",
-    x = "Valence",
-    y = "Popularity"
-  )
-
-# 6.6 Popularity by energy level
-ggplot(spotify, aes(x = energy_level, y = popularity)) +
-  geom_boxplot() +
-  theme_minimal() +
-  labs(
-    title = "Popularity by Energy Level",
-    x = "Energy Level",
-    y = "Popularity"
-  )
-
-# 6.7 Popularity by danceability level
-ggplot(spotify, aes(x = danceability_level, y = popularity)) +
-  geom_boxplot() +
-  theme_minimal() +
-  labs(
-    title = "Popularity by Danceability Level",
-    x = "Danceability Level",
-    y = "Popularity"
-  )
-
-# 6.8 Popularity by tempo category
-ggplot(spotify, aes(x = tempo_category, y = popularity)) +
-  geom_boxplot() +
-  theme_minimal() +
-  labs(
-    title = "Popularity by Tempo Category",
-    x = "Tempo Category",
-    y = "Popularity"
-  )
+eda_results
 
 # -----------------------------
-# 7. Correlation analysis
+# 5. Prepare modelling datasets
 # -----------------------------
-# Select numeric variables for correlation matrix
-numeric_data <- spotify %>%
+
+# Dataset with all genres
+spotify_model_all <- spotify %>%
   select(
-    popularity, danceability, energy, loudness,
-    tempo, valence, acousticness, duration_min
-  )
+    popularity,
+    is_hit,
+    danceability,
+    loudness,
+    instrumentalness,
+    speechiness,
+    valence,
+    track_genre,
+    duration_min
+  ) %>%
+  mutate(
+    track_genre = as.factor(track_genre),
+    is_hit = factor(
+      is_hit,
+      levels = c("Not Hit", "Hit"),
+      labels = c("No", "Yes")
+    )
+  ) %>%
+  drop_na()
 
-# Compute correlation matrix
-cor_matrix <- cor(numeric_data, use = "complete.obs")
+# Dataset with top 10 genres by average popularity
+spotify_model_top10 <- spotify_model_all %>%
+  filter(track_genre %in% top_genres$track_genre) %>%
+  mutate(track_genre = droplevels(track_genre))
 
-# Visualize correlation matrix
-corrplot(cor_matrix, method = "circle")
+# Check modelling datasets
+table(spotify_model_top10$track_genre)
+table(spotify_model_all$is_hit)
 
 # -----------------------------
-# 8. Train-test split
+# 6. Cross-validation setup
 # -----------------------------
-# This will be used later for predictive models
+
 set.seed(123)
 
-trainIndex <- createDataPartition(spotify$is_hit, p = 0.8, list = FALSE)
-
-train <- spotify[trainIndex, ]
-test  <- spotify[-trainIndex, ]
-
-# Check sizes
-nrow(train)
-nrow(test)
-
-# -----------------------------
-# 9. Logistic regression
-# -----------------------------
-# Predict whether a song is a hit
-model_logit <- glm(
-  is_hit ~ danceability + energy + loudness + tempo + valence + acousticness + duration_min,
-  data = train,
-  family = "binomial"
+classification_control <- trainControl(
+  method = "cv",
+  number = 5,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary
 )
 
-summary(model_logit)
-
-# Predict probabilities on test set
-pred_probs <- predict(model_logit, test, type = "response")
-
-# Convert probabilities to classes
-pred_class <- ifelse(pred_probs > 0.5, "Hit", "Not Hit")
-pred_class <- as.factor(pred_class)
-
-# Confusion matrix
-confusionMatrix(pred_class, test$is_hit)
-
-# -----------------------------
-# 10. Linear regression
-# -----------------------------
-# Predict song popularity
-model_lm <- lm(
-  popularity ~ danceability + energy + loudness + tempo + valence + acousticness + duration_min,
-  data = train
+regression_control <- trainControl(
+  method = "cv",
+  number = 5
 )
 
-summary(model_lm)
+# -----------------------------
+# 7. Logistic Regression - Top 10 Genres by Average Popularity Model
+# -----------------------------
+
+model_logit_top10 <- train(
+  is_hit ~ danceability + loudness + instrumentalness +
+    speechiness + valence + track_genre,
+  data = spotify_model_top10,
+  method = "glm",
+  family = "binomial",
+  trControl = classification_control,
+  metric = "ROC"
+)
+
+model_logit_top10
+
+predictions_top10 <- predict(model_logit_top10, spotify_model_top10)
+confusionMatrix(predictions_top10, spotify_model_top10$is_hit)
+
+summary(model_logit_top10$finalModel)
 
 # -----------------------------
-# 11. Decision tree
+# 8. Logistic Regression - All Genres Model
 # -----------------------------
-# Classification tree for hit prediction
+
+model_logit_all <- train(
+  is_hit ~ danceability + loudness + instrumentalness +
+    speechiness + valence + track_genre,
+  data = spotify_model_all,
+  method = "glm",
+  family = "binomial",
+  trControl = classification_control,
+  metric = "ROC"
+)
+
+model_logit_all
+
+predictions_all <- predict(model_logit_all, spotify_model_all)
+confusionMatrix(predictions_all, spotify_model_all$is_hit)
+
+summary(model_logit_all$finalModel)
+
+# -----------------------------
+# 9. Linear Regression Model
+# -----------------------------
+
+model_lm <- train(
+  popularity ~ danceability + loudness + instrumentalness +
+    speechiness + valence + track_genre,
+  data = spotify_model_all,
+  method = "lm",
+  trControl = regression_control
+)
+
+model_lm
+summary(model_lm$finalModel)
+
+# -----------------------------
+# 10. Decision Tree Model
+# -----------------------------
+
 tree_model <- rpart(
-  is_hit ~ danceability + energy + loudness + tempo + valence + acousticness + duration_min,
-  data = train,
+  is_hit ~ danceability + loudness + instrumentalness +
+    speechiness + valence + track_genre,
+  data = spotify_model_all,
   method = "class"
 )
 
-rpart.plot(tree_model)
+rpart.plot(
+  tree_model,
+  type = 2,
+  extra = 104,
+  fallen.leaves = TRUE,
+  cex = 0.7,
+  split.fun = function(x, labs, digits, varlen, faclen) {
+    ifelse(grepl("track_genre", labs), "Genre group split", labs)
+  }
+)
 
-# -----------------------------
-# 12. Optional: Save plots
-# -----------------------------
-# Example:
-# ggsave("outputs/popularity_histogram.png", width = 8, height = 5)
+tree_predictions <- predict(tree_model, spotify_model_all, type = "class")
+confusionMatrix(tree_predictions, spotify_model_all$is_hit)
